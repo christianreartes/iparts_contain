@@ -332,7 +332,7 @@
 !$omp parallel do
     DO j = 1, this%nparts_
       this%px_(j) = this%ptmp0_(1,j) + dtfact*this%pvx_(j)
-      this%pvx_(j) = this%ttmp0_(1,j) + dtv*this%dfx_(j) + Reffe*(1+h)*this%dlvx_(j)
+      this%pvx_(j) = this%ttmp0_(1,j) + dtv*this%dfx_(j) + Reffe*(this%dlvx_(j) + h*this%lvx_(j-1)*this%dlvx_(j))
     ENDDO
 
     ! ... y:
@@ -340,7 +340,7 @@
 !$omp parallel do
     DO j = 1, this%nparts_
       this%py_(j) = this%ptmp0_(2,j) + dtfact*this%pvy_(j)
-      this%pvy_(j) = this%ttmp0_(2,j) + dtv*this%dfy_(j) + Reffe*(1+h)*this%dlvy_(j)
+      this%pvy_(j) = this%ttmp0_(2,j) + dtv*this%dfy_(j) + Reffe*(this%dlvy_(j) + h*this%lvy_(j-1)*this%dlvy_(j))
     ENDDO
 
     ! ... z:
@@ -348,7 +348,7 @@
 !$omp parallel do
     DO j = 1, this%nparts_
       this%pz_(j) = this%ptmp0_(3,j) + dtfact*this%pvz_(j)
-      this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j) + Reffe*(1+h)*this%dlvz_(j) - this%grav_)
+      this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j) - this%grav_) + Reffe*(this%dlvz_(j) + h*this%lvz_(j-1)*this%dlvz_(j))
     ENDDO
 
     ! Enforce periodicity in x-y only:
