@@ -313,7 +313,7 @@
     CALL GPart_EulerToLag(this,this%lvz_,this%nparts_,vz,.false.,tmp1,tmp2)
 
     ! Calculo las diferencias de la derivada convectiva    
-    DO j = 1, algo?
+    DO j = 1, this%nparts_
        this%dlvx_(j) = (this%lvx_(j)-this%lvx_(j-1))
        this%dlvy_(j) = (this%lvy_(j)-this%lvy_(j-1))
        this%dlvz_(j) = (this%lvz_(j)-this%lvz_(j-1))
