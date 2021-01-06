@@ -132,7 +132,7 @@
 ! InerGPart SUBROUTINES
 !=================================================================
 
-  SUBROUTINE InerGPart_ctor(this,tau,grav)
+  SUBROUTINE InerGPart_ctor(this,tau,grav,gamma,bvfreq,nu,donldrag,om,x0)
 !-----------------------------------------------------------------
 !-----------------------------------------------------------------
 !  Explicit constructor for inertial particles. Should be called
@@ -142,15 +142,35 @@
 !    this    : 'this' class instance
 !    tau     : Stokes time
 !    grav    : gravity acceleration
+!    gamma   : mass ratio (= m_f/m_p)
+!    nu      : fluid viscosity
 !-----------------------------------------------------------------
     USE fprecision
 
     IMPLICIT NONE
     CLASS(InerGPart), INTENT(INOUT)     :: this
-    REAL(KIND=GP),INTENT(IN)            :: tau,grav
+    REAL(KIND=GP),INTENT(IN)            :: tau,grav,gamma,bvfreq,nu
+    REAL(KIND=GP),INTENT(IN),OPTIONAL   :: om(3),x0(3)
+    INTEGER,      INTENT(IN)            :: donldrag
 
-    this%invtau_ = 1.0_GP/tau
-    this%grav_   = grav
+    this%tau_      = tau
+    this%invtau_   = 1.0_GP/tau
+    this%grav_     = grav
+    this%gamma_    = gamma
+    this%bvfreq_   = bvfreq
+    this%nu_       = nu
+    this%donldrag_ = donldrag
+    IF (PRESENT(om)) THEN
+       this%dorotatn_ = 1
+       this%omegax_ = om(1)
+       this%omegay_ = om(2)
+       this%omegaz_ = om(3)
+       this%px0_ = x0(1)
+       this%py0_ = x0(2)
+       this%pz0_ = x0(3)
+    ELSE
+       this%dorotatn_ = 0
+    ENDIF       
 
     ALLOCATE(this%pvx_     (this%maxparts_))
     ALLOCATE(this%pvy_     (this%maxparts_))
@@ -194,14 +214,12 @@
 !-----------------------------------------------------------------
 !  METHOD     : InitVel
 !  DESCRIPTION: Initializes particle velocities with fluid
-!               velocities, tau, and gravity. Other parameters
-!               are initialized with GPart_Init.
+!               velocities. Other parameters are initialized
+!               with GPart_Init.
 !  ARGUMENTS:
 !    this    : 'this' class instance
 !    vz,vy,vz: compoments of velocity field, in real space, partially
 !              updated, possibly. These will be overwritten!
-!    tau     : Stokes time
-!    grav    : gravity acceleration
 !    tmpX    : temp arrays the same size as vx, vy, vz
 !-----------------------------------------------------------------
     USE grid
@@ -242,15 +260,15 @@
     CLASS(InerGPart), INTENT(INOUT) :: this
     INTEGER                          :: j
 
-    ! Initialize solution, u: 
-    ! u* <-- u: 
+    ! Initialize solution, v (particle velocity): 
+    ! v* <-- v: 
  
     ! Cycle over JST loop to update state:
 !$omp parallel do
     DO j = 1, this%nparts_
-       this%ttmp0_(1,j) = this%pvx_(j)  ! ux_0
-       this%ttmp0_(2,j) = this%pvy_(j)  ! uy_0
-       this%ttmp0_(3,j) = this%pvz_(j)  ! uz_0
+       this%ttmp0_(1,j) = this%pvx_(j)  ! vx_0
+       this%ttmp0_(2,j) = this%pvy_(j)  ! vy_0
+       this%ttmp0_(3,j) = this%pvz_(j)  ! vz_0
     ENDDO
     
   END SUBROUTINE InerGPart_SetStepRKK
@@ -266,7 +284,7 @@
 !               an outer stepper method of the form:
 !
 !               X = X_0 + dt * V[X(t),t] * xk,
-!               V = V_0 + dt * ( F[V(X(t)),U(X(t))] - g_z) * xk,
+!               V = V_0 + dt * (F[V(X(t)),U(X(t))] - g_z) * xk,
 !       
 !               where F is the drag force, V(X(t)) is the particle
 !               velocity, U(X(t)) is the Lagrangian velocity, and
@@ -275,14 +293,18 @@
 !
 !               F = 1/tau ( U(X(t)) - V(X(t)) )
 !
+!               Inertial particles in this method are pointwise and
+!               heavy. Any other forces, except for the Stokes drag,
+!               are neglected.
+!
 !               Note that the vx, vy, vz, will be overwritten here.
 !  ARGUMENTS  :
-!    this    : 'this' class instance
-!    vz,vy,vz: compoments of velocity field, in real space, partially
-!              updated, possibly. These will be overwritten!
-!    dt      : integration timestep
-!    xk      : multiplicative RK time stage factor
-!    tmpX    : temp arrays the same size as vx, vy, vz
+!    this     : 'this' class instance
+!    vz,vy,vz : compoments of velocity field, in real space, partially
+!               updated, possibly. These will be overwritten!
+!    dt       : integration timestep
+!    xk       : multiplicative RK time stage factor
+!    tmpX     : temp arrays the same size as vx, vy, vz
 !-----------------------------------------------------------------
     USE grid
     USE fprecision
@@ -300,11 +322,6 @@
     REAL(KIND=GP), ALLOCATABLE, DIMENSION              (:) :: lid,gid
 
     dtv    = dt*xk
-
-    !Aca agrego algo proporcional a la diferencias de las masas
-    R      = gama/(1 + gama/2)
-    Reffe  = (3/2)*R
-
     CALL GTStart(this%htimers_(GPTIME_STEP))
 
     ! Find the Lagrangian velocity for F(U*,V*):
@@ -312,15 +329,8 @@
     CALL GPart_EulerToLag(this,this%lvy_,this%nparts_,vy,.false.,tmp1,tmp2)
     CALL GPart_EulerToLag(this,this%lvz_,this%nparts_,vz,.false.,tmp1,tmp2)
 
-    ! Calculo las diferencias de la derivada convectiva    
-    DO j = 1, this%nparts_
-       this%dlvx_(j) = (this%lvx_(j)-this%lvx_(j-1))
-       this%dlvy_(j) = (this%lvy_(j)-this%lvy_(j-1))
-       this%dlvz_(j) = (this%lvz_(j)-this%lvz_(j-1))
-    ENDDO
-
-
     ! Drag force
+!$omp parallel do
     DO j = 1, this%nparts_
        this%dfx_(j) = (this%lvx_(j)-this%pvx_(j))*this%invtau_
        this%dfy_(j) = (this%lvy_(j)-this%pvy_(j))*this%invtau_
@@ -332,7 +342,7 @@
 !$omp parallel do
     DO j = 1, this%nparts_
       this%px_(j) = this%ptmp0_(1,j) + dtfact*this%pvx_(j)
-      this%pvx_(j) = this%ttmp0_(1,j) + dtv*this%dfx_(j) + Reffe*(this%dlvx_(j) + h*this%lvx_(j-1)*this%dlvx_(j))
+      this%pvx_(j) = this%ttmp0_(1,j) + dtv*this%dfx_(j)
     ENDDO
 
     ! ... y:
@@ -340,7 +350,7 @@
 !$omp parallel do
     DO j = 1, this%nparts_
       this%py_(j) = this%ptmp0_(2,j) + dtfact*this%pvy_(j)
-      this%pvy_(j) = this%ttmp0_(2,j) + dtv*this%dfy_(j) + Reffe*(this%dlvy_(j) + h*this%lvy_(j-1)*this%dlvy_(j))
+      this%pvy_(j) = this%ttmp0_(2,j) + dtv*this%dfy_(j)
     ENDDO
 
     ! ... z:
@@ -348,7 +358,7 @@
 !$omp parallel do
     DO j = 1, this%nparts_
       this%pz_(j) = this%ptmp0_(3,j) + dtfact*this%pvz_(j)
-      this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j) - this%grav_) + Reffe*(this%dlvz_(j) + h*this%lvz_(j-1)*this%dlvz_(j))
+      this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j)-this%grav_)
     ENDDO
 
     ! Enforce periodicity in x-y only:
@@ -359,6 +369,181 @@
     CALL InerGPart_EndStageRKK(this,vx,vy,vz,xk,tmp1,tmp2)
 
   END SUBROUTINE InerGPart_StepRKK
+!-----------------------------------------------------------------
+!-----------------------------------------------------------------
+
+  SUBROUTINE InerGPart_lite_StepRKK(this, vx, vy, vz, ax, ay, az, dt, xk, tmp1, tmp2)
+!-----------------------------------------------------------------
+!-----------------------------------------------------------------
+!  METHOD     : Step_testp
+!  DESCRIPTION: Carries out one stage of explicit RK-like time
+!               integration step.  Intended for explicit step within 
+!               an outer stepper method of the form:
+!
+!               X = X_0 + dt * V[X(t),t] * xk,
+!               V = V_0 + dt * (F[V(X(t)),U(X(t))] - G_z + 3/2 R DU/Dt) * xk,
+!       
+!               where F is the drag force, V(X(t)) is the particle
+!               velocity, U(X(t)) is the Lagrangian velocity, G_z is
+!               the z-component of the corrected gravity acceleration  
+!               (= g*(1-gamma)/(1+gamma/2), with g>0 and gamma=m_f/m_p,
+!               where m_f is the fluid mass and m_p the particle mass),
+!               DU/dt is the fluid Lagrangian acceleration, and
+!               R=gamma/(1+gamma/2).
+!               The drag force is:
+!
+!               F = 1/tau ( U(X(t)) - V(X(t)) )
+!
+!               or
+!
+!               F = (1 + 0.15 Re_p^0.687) /tau ( U(X(t)) - V(X(t)) )
+!
+!               if nonlinear drag is used (see Wang & Maxey 1993),
+!               where Re_p = (18 tau gamma/nu)^(1/2) |U - V|, and
+!               |U - V| = [(Ux-Vx)^2+(Uy-Vy)^2+(Uz-Vz)^2]^(1/2).
+!               If rotation is enabled in the fluid solver, the equation
+!               for the velocity also includes the Coriolis force:
+!
+!               - 2 Omega x [V(X(t)) - 3/2 R U(X(t))]
+!
+!               and centrifugal force:
+!
+!               - (1 - 3/2 R) Omega x Omega x [X(t) - X0] 
+!
+!               where X0 is located in the center of the domain.    
+!               This method is intended for light inertial particles, or
+!               for inertial particles that include all terms in the
+!               Maxey-Riley equations to first order in the particle radius.
+!               Note that the vx, vy, vz, will be overwritten here.
+!  ARGUMENTS  :
+!    this     : 'this' class instance
+!    vz,vy,vz : compoments of velocity field, in real space, partially
+!               updated, possibly. These will be overwritten!
+!    az,ay,az : compoments of Lagrangian acceleration, in real space,
+!               partially updated, possibly. These may be overwritten!
+!    dt       : integration timestep
+!    xk       : multiplicative RK time stage factor
+!    tmpX     : temp arrays the same size as vx, vy, vz
+!-----------------------------------------------------------------
+    USE grid
+    USE fprecision
+    USE commtypes
+    USE mpivars
+
+    IMPLICIT NONE
+    CLASS(InerGPart) ,INTENT(INOUT)                        :: this
+    INTEGER                                                :: i,j
+    REAL(KIND=GP),INTENT(INOUT),DIMENSION(nx,ny,ksta:kend) :: vx,vy,vz
+    REAL(KIND=GP),INTENT(INOUT),DIMENSION(nx,ny,ksta:kend) :: ax,ay,az
+    REAL(KIND=GP),INTENT(INOUT),DIMENSION(nx,ny,ksta:kend) :: tmp1,tmp2
+    REAL(KIND=GP),INTENT   (IN)                            :: dt,xk
+    REAL(KIND=GP)                                          :: dtfact
+    REAL(KIND=GP)                                          :: dtv
+    REAL(KIND=GP)                                          :: rep,cdrag
+    REAL(KIND=GP)                                          :: tmparg
+    REAL(KIND=GP), ALLOCATABLE, DIMENSION              (:) :: lid,gid
+
+    dtv    = dt*xk
+    CALL GTStart(this%htimers_(GPTIME_STEP))
+
+    ! Find the Lagrangian velocity for F(U,V):
+    CALL GPart_EulerToLag(this,this%lvx_,this%nparts_,vx,.true.,tmp1,tmp2)
+    CALL GPart_EulerToLag(this,this%lvy_,this%nparts_,vy,.false.,tmp1,tmp2)
+    CALL GPart_EulerToLag(this,this%lvz_,this%nparts_,vz,.false.,tmp1,tmp2)
+
+    ! Find the Lagrangian acceleration of the fluid:
+    CALL GPart_EulerToLag(this,this%dfx_,this%nparts_,ax,.false.,tmp1,tmp2)
+    CALL GPart_EulerToLag(this,this%dfy_,this%nparts_,ay,.false.,tmp1,tmp2)
+    CALL GPart_EulerToLag(this,this%dfz_,this%nparts_,az,.false.,tmp1,tmp2)
+
+    ! Drag force plus mass ratio term
+
+    tmparg = 1.5_GP*this%gamma_/(1.0_GP+0.5_GP*this%gamma_)
+    IF ( this%donldrag_.EQ.0 ) THEN ! Linear drag
+!$omp parallel do
+    DO j = 1, this%nparts_
+       this%dfx_(j) = this%dfx_(j)*tmparg+(this%lvx_(j)-this%pvx_(j))*this%invtau_
+       this%dfy_(j) = this%dfy_(j)*tmparg+(this%lvy_(j)-this%pvy_(j))*this%invtau_
+       this%dfz_(j) = this%dfz_(j)*tmparg+(this%lvz_(j)-this%pvz_(j))*this%invtau_
+    ENDDO
+    ELSE IF ( this%donldrag_.EQ.1 ) THEN ! Nonlinear drag
+    rep = .15_GP*(18.0_GP*this%tau_*this%gamma_/this%nu_)**0.3435 ! 0.3435 = 0.687/2
+!$omp parallel do
+    DO j = 1, this%nparts_
+       cdrag = 1.0_GP + rep*((this%lvx_(j)-this%pvx_(j))**2 + &
+               (this%lvy_(j)-this%pvy_(j))**2 + (this%lvz_(j)-this%pvz_(j))**2)**0.3435
+       this%dfx_(j) = this%dfx_(j)*tmparg+(this%lvx_(j)-this%pvx_(j))*cdrag*this%invtau_
+       this%dfy_(j) = this%dfy_(j)*tmparg+(this%lvy_(j)-this%pvy_(j))*cdrag*this%invtau_
+       this%dfz_(j) = this%dfz_(j)*tmparg+(this%lvz_(j)-this%pvz_(j))*cdrag*this%invtau_
+    ENDDO
+    ENDIF
+
+    ! Rotation
+    IF ( this%dorotatn_.EQ.1 ) THEN
+    DO j = 1, this%nparts_
+       this%dfx_(j) = this%dfx_(j)-2.0_GP*(this%omegay_*(this%pvz_(j)-tmparg*this%lvz_(j))  - &
+                                           this%omegaz_*(this%pvy_(j)-tmparg*this%lvy_(j))) - &
+        (1.0_GP-tmparg)*(this%omegay_*(this%omegax_*this%delta_(2)*(this%py_(j)-this%py0_)  - &
+                                       this%omegay_*this%delta_(1)*(this%px_(j)-this%px0_)) - &
+                         this%omegaz_*(this%omegaz_*this%delta_(1)*(this%px_(j)-this%px0_)  - &
+                                       this%omegax_*this%delta_(3)*(this%pz_(j)-this%pz0_)))
+       this%dfy_(j) = this%dfy_(j)-2.0_GP*(this%omegaz_*(this%pvx_(j)-tmparg*this%lvx_(j))  - &
+                                           this%omegax_*(this%pvz_(j)-tmparg*this%lvz_(j))) - &
+        (1.0_GP-tmparg)*(this%omegaz_*(this%omegay_*this%delta_(3)*(this%pz_(j)-this%pz0_)  - &
+                                       this%omegaz_*this%delta_(2)*(this%py_(j)-this%py0_)) - &
+                         this%omegax_*(this%omegax_*this%delta_(2)*(this%py_(j)-this%py0_)  - &
+                                       this%omegay_*this%delta_(1)*(this%px_(j)-this%px0_)))
+       this%dfz_(j) = this%dfz_(j)-2.0_GP*(this%omegax_*(this%pvy_(j)-tmparg*this%lvy_(j))  - &
+                                           this%omegay_*(this%pvx_(j)-tmparg*this%lvx_(j))) - &
+        (1.0_GP-tmparg)*(this%omegax_*(this%omegaz_*this%delta_(1)*(this%px_(j)-this%px0_)  - &
+                                       this%omegax_*this%delta_(3)*(this%pz_(j)-this%pz0_)) - &
+                         this%omegay_*(this%omegay_*this%delta_(3)*(this%pz_(j)-this%pz0_)  - &
+                                       this%omegaz_*this%delta_(2)*(this%py_(j)-this%py0_)))
+    ENDDO
+    ENDIF
+
+    ! ... x:
+    dtfact = dt*xk*this%invdel_(1)
+!$omp parallel do
+    DO j = 1, this%nparts_
+      this%px_(j) = this%ptmp0_(1,j) + dtfact*this%pvx_(j)
+      this%pvx_(j) = this%ttmp0_(1,j) + dtv*this%dfx_(j)
+    ENDDO
+
+    ! ... y:
+    dtfact = dt*xk*this%invdel_(2)
+!$omp parallel do
+    DO j = 1, this%nparts_
+      this%py_(j) = this%ptmp0_(2,j) + dtfact*this%pvy_(j)
+      this%pvy_(j) = this%ttmp0_(2,j) + dtv*this%dfy_(j)
+    ENDDO
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      ! ... z:
+    dtfact = dt*xk*this%invdel_(3)
+    IF ( this%stratified) THEN                                                                                 !Tenemos que definir la condición
+    !$omp parallel do
+         DO j = 1, this%nparts_
+         this%pz_(j) = this%ptmp0_(3,j) + dtfact*this%pvz_(j)
+         tmparg = (this%bvfreq_*theta-this%bvfreq_**2*(this%pz_(j)-REFERENCIA?))/(1.0_GP+0.5_GP*this%gamma_)    !Tenemos que definir el Z_0 de referencia
+         this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j)+tmpartg)                                           !y como entra theta en el codigo
+         ENDDO
+         ELSE
+         tmparg = this%grav_*(1.0_GP-this%gamma_)/(1.0_GP+0.5_GP*this%gamma_)
+    !$omp parallel do
+         DO j = 1, this%nparts_
+         this%pz_(j) = this%ptmp0_(3,j) + dtfact*this%pvz_(j)
+         this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j)-tmparg)
+         ENDDO
+        ENDIF
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ! Enforce periodicity in x-y only:
+    CALL GPart_MakePeriodicP(this,this%px_,this%py_,this%pz_,this%nparts_,3)
+
+    CALL GTAcc(this%htimers_(GPTIME_STEP))
+
+    CALL InerGPart_EndStageRKK(this,vx,vy,vz,xk,tmp1,tmp2)
+
+  END SUBROUTINE InerGPart_lite_StepRKK
 !-----------------------------------------------------------------
 !-----------------------------------------------------------------
 
