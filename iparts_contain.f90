@@ -372,7 +372,7 @@
 !-----------------------------------------------------------------
 !-----------------------------------------------------------------
 
-  SUBROUTINE InerGPart_lite_StepRKK(this, vx, vy, vz, ax, ay, az, dt, xk, tmp1, tmp2)
+  SUBROUTINE InerGPart_lite_StepRKK(this, vx, vy, vz, ax, ay, az,theta, dt, xk, tmp1, tmp2)
 !-----------------------------------------------------------------
 !-----------------------------------------------------------------
 !  METHOD     : Step_testp
@@ -435,6 +435,8 @@
     INTEGER                                                :: i,j
     REAL(KIND=GP),INTENT(INOUT),DIMENSION(nx,ny,ksta:kend) :: vx,vy,vz
     REAL(KIND=GP),INTENT(INOUT),DIMENSION(nx,ny,ksta:kend) :: ax,ay,az
+    REAL(KIND=GP),INTENT(INOUT),&                                               
+                       OPTIONAL,DIMENSION(nx,ny,ksta:kend) :: theta
     REAL(KIND=GP),INTENT(INOUT),DIMENSION(nx,ny,ksta:kend) :: tmp1,tmp2
     REAL(KIND=GP),INTENT   (IN)                            :: dt,xk
     REAL(KIND=GP)                                          :: dtfact
@@ -455,7 +457,10 @@
     CALL GPart_EulerToLag(this,this%dfx_,this%nparts_,ax,.false.,tmp1,tmp2)
     CALL GPart_EulerToLag(this,this%dfy_,this%nparts_,ay,.false.,tmp1,tmp2)
     CALL GPart_EulerToLag(this,this%dfz_,this%nparts_,az,.false.,tmp1,tmp2)
-
+    
+    ! Find the Lagrangian potential temperature Theta:
+    CALL GPart_EulerToLag(this,this%th_,this%nparts_,theta,.false.,tmp1,tmp2)
+    
     ! Drag force plus mass ratio term
 
     tmparg = 1.5_GP*this%gamma_/(1.0_GP+0.5_GP*this%gamma_)
@@ -524,7 +529,7 @@
     !$omp parallel do
          DO j = 1, this%nparts_
          this%pz_(j) = this%ptmp0_(3,j) + dtfact*this%pvz_(j)
-         tmparg = (this%bvfreq_*theta-this%bvfreq_**2*(this%pz_(j)-REFERENCIA?))/(1.0_GP+0.5_GP*this%gamma_)    !Tenemos que definir el Z_0 de referencia
+         tmparg = (this%bvfreq_*this%th_-this%bvfreq_**2*(this%pz_(j)-REFERENCIA?))/(1.0_GP+0.5_GP*this%gamma_) !Tenemos que definir el Z_0 de referencia
          this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j)+tmpartg)                                           !y como entra theta en el codigo
          ENDDO
          ELSE
