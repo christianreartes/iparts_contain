@@ -132,7 +132,7 @@
 ! InerGPart SUBROUTINES
 !=================================================================
 
-  SUBROUTINE InerGPart_ctor(this,tau,grav,gamma,bvfreq,nu,donldrag,om,x0)
+  SUBROUTINE InerGPart_ctor(this,tau,grav,gamma,nu,donldrag,om,x0)
 !-----------------------------------------------------------------
 !-----------------------------------------------------------------
 !  Explicit constructor for inertial particles. Should be called
@@ -149,7 +149,7 @@
 
     IMPLICIT NONE
     CLASS(InerGPart), INTENT(INOUT)     :: this
-    REAL(KIND=GP),INTENT(IN)            :: tau,grav,gamma,bvfreq,nu
+    REAL(KIND=GP),INTENT(IN)            :: tau,grav,gamma,nu
     REAL(KIND=GP),INTENT(IN),OPTIONAL   :: om(3),x0(3)
     INTEGER,      INTENT(IN)            :: donldrag
 
@@ -157,7 +157,6 @@
     this%invtau_   = 1.0_GP/tau
     this%grav_     = grav
     this%gamma_    = gamma
-    this%bvfreq_   = bvfreq
     this%nu_       = nu
     this%donldrag_ = donldrag
     IF (PRESENT(om)) THEN
@@ -372,7 +371,7 @@
 !-----------------------------------------------------------------
 !-----------------------------------------------------------------
 
-  SUBROUTINE InerGPart_lite_StepRKK(this, vx, vy, vz, ax, ay, az,theta, dt, xk, tmp1, tmp2)
+  SUBROUTINE InerGPart_lite_StepRKK(this, vx, vy, vz, ax, ay, az, theta, bvfrec, refz, dt, xk, tmp1, tmp2)
 !-----------------------------------------------------------------
 !-----------------------------------------------------------------
 !  METHOD     : Step_testp
@@ -444,6 +443,7 @@
     REAL(KIND=GP)                                          :: rep,cdrag
     REAL(KIND=GP)                                          :: tmparg
     REAL(KIND=GP), ALLOCATABLE, DIMENSION              (:) :: lid,gid
+    REAL(KIND=GP),INTENT(IN),OPTIONAL                      :: bvfrec, refz
 
     dtv    = dt*xk
     CALL GTStart(this%htimers_(GPTIME_STEP))
@@ -459,8 +459,18 @@
     CALL GPart_EulerToLag(this,this%dfz_,this%nparts_,az,.false.,tmp1,tmp2)
     
     ! Find the Lagrangian potential temperature Theta:
-    CALL GPart_EulerToLag(this,this%th_,this%nparts_,theta,.false.,tmp1,tmp2)
+    IF (present(theta)) THEN
+        CALL GPart_EulerToLag(this,this%th_,this%nparts_,theta,.false.,tmp1,tmp2)
+    ENDIF
     
+    ! Particle function parameters in stratified fluid:
+    IF (present(bvfreq)) THEN
+        this%bvfreq_   = bvfreq
+    ENDIF
+    IF (present(refz)) THEN    
+        this%refz_   = refz
+    ENDIF    
+        
     ! Drag force plus mass ratio term
 
     tmparg = 1.5_GP*this%gamma_/(1.0_GP+0.5_GP*this%gamma_)
@@ -522,15 +532,14 @@
       this%py_(j) = this%ptmp0_(2,j) + dtfact*this%pvy_(j)
       this%pvy_(j) = this%ttmp0_(2,j) + dtv*this%dfy_(j)
     ENDDO
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       ! ... z:
     dtfact = dt*xk*this%invdel_(3)
-    IF ( this%stratified) THEN                                                                                 !Tenemos que definir la condición
+    IF (present(theta)) THEN
     !$omp parallel do
          DO j = 1, this%nparts_
          this%pz_(j) = this%ptmp0_(3,j) + dtfact*this%pvz_(j)
-         tmparg = (this%bvfreq_*this%th_-this%bvfreq_**2*(this%pz_(j)-REFERENCIA?))/(1.0_GP+0.5_GP*this%gamma_) !Tenemos que definir el Z_0 de referencia
-         this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j)+tmpartg)                                           !y como entra theta en el codigo
+         tmparg = (this%bvfreq_*this%th_-this%bvfreq_**2*(this%pz_(j)-this%refz_))/(1.0_GP+0.5_GP*this%gamma_)
+         this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j)+tmpartg)
          ENDDO
          ELSE
          tmparg = this%grav_*(1.0_GP-this%gamma_)/(1.0_GP+0.5_GP*this%gamma_)
@@ -540,7 +549,6 @@
          this%pvz_(j) = this%ttmp0_(3,j) + dtv*(this%dfz_(j)-tmparg)
          ENDDO
         ENDIF
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     ! Enforce periodicity in x-y only:
     CALL GPart_MakePeriodicP(this,this%px_,this%py_,this%pz_,this%nparts_,3)
 
